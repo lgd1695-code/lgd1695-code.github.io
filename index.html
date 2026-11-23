@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#06122c">
+<meta name="description" content="Orbit Drop - game menara putar. Geser untuk memutar menara, jatuhkan bola lewat celah, hindari lantai bergaris.">
+<title>Orbit Drop</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+html,body{margin:0;height:100%;background:#050205;overflow:hidden;overscroll-behavior:none;touch-action:none;
+  font-family:"Trebuchet MS","Segoe UI",Roboto,Arial,sans-serif}
+body{display:flex;align-items:center;justify-content:center}
+
+#wrap{position:relative;height:100vh;height:100dvh;
+  width:min(100vw,calc(100vh*.45));width:min(100vw,calc(100dvh*.45));
+  container-type:inline-size;background:#06122c;overflow:hidden;--acc:#5ef2d0;
+  border:2px solid rgba(255,255,255,.18);box-shadow:0 0 40px rgba(0,0,0,.7);transition:border-color .25s}
+#wrap.dead{border-color:rgba(255,90,110,.75)}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+
+/* HUD */
+#hud{position:absolute;left:0;right:0;top:4cqw;padding:0 5cqw;pointer-events:none}
+#hud .row{display:flex;justify-content:space-between}
+.chip{padding:1.8cqw 4.5cqw;border-radius:99cqw;background:rgba(255,255,255,.12);border:.4cqw solid rgba(255,255,255,.25);
+  color:#fff;font-weight:800;font-size:4.4cqw;letter-spacing:.4cqw}
+.chip b{color:var(--acc);display:inline-block}
+.chip b.bump{animation:bump .18s ease-out}
+@keyframes bump{50%{transform:scale(1.35)}}
+.track{margin-top:3cqw;height:2.2cqw;border-radius:99cqw;background:rgba(255,255,255,.16);overflow:hidden}
+.track i{display:block;height:100%;width:0;border-radius:99cqw;background:var(--acc);box-shadow:0 0 3cqw var(--acc)}
+#combo{position:absolute;left:0;right:0;top:22cqw;text-align:center;font-size:6.5cqw;font-weight:900;color:#ffd24a;
+  text-shadow:0 0 2cqw #ff7a00;opacity:0;transition:opacity .15s;pointer-events:none;letter-spacing:.6cqw}
+#combo.on{opacity:1}
+
+/* Overlay */
+#overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  text-align:center;color:#fff;pointer-events:none;padding:0 8cqw;gap:3cqw;background:rgba(0,0,0,.45);transition:opacity .25s}
+#overlay.hide{opacity:0}
+#overlay h1{margin:0;font-size:13cqw;font-weight:900;letter-spacing:.5cqw;text-shadow:0 1cqw 0 rgba(0,0,0,.4)}
+#overlay p{margin:0;font-size:4.4cqw;line-height:1.45;opacity:.95}
+#overlay .btn{margin-top:3cqw;padding:3cqw 9cqw;border-radius:99cqw;background:var(--acc);color:#04101f;font-weight:900;font-size:5cqw;
+  box-shadow:0 1.2cqw 0 rgba(0,0,0,.35);animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{50%{transform:scale(1.07)}}
+
+#mute{position:absolute;right:3cqw;bottom:3cqw;width:11cqw;height:11cqw;border-radius:50%;border:0;
+  background:rgba(255,255,255,.18);color:#fff;font-size:5.5cqw;cursor:pointer;z-index:5}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="hud">
+    <div class="row"><div class="chip">LEVEL <b id="lvA">1</b></div><div class="chip">★ <b id="scoreChip">0</b></div></div>
+    <div class="track"><i id="barFill"></i></div>
+  </div>
+  <div id="combo">FIRE!</div>
+  <div id="overlay">
+    <h1 id="ovTitle"></h1>
+    <p id="ovText"></p>
+    <div class="btn" id="ovBtn"></div>
+  </div>
+  <button id="mute" aria-label="Suara">🔊</button>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ============ Elemen ============ */
+const $ = id => document.getElementById(id);
+const wrap = $('wrap'), canvas = $('c'), ctx = canvas.getContext('2d');
+const lvA = $('lvA'), barFill = $('barFill'), scoreEl = $('scoreChip'), comboEl = $('combo');
+const overlay = $('overlay'), ovTitle = $('ovTitle'), ovText = $('ovText'), ovBtn = $('ovBtn'), muteBtn = $('mute');
+
+/* ============ Konstanta ============ */
+const VW = 720, CX = VW / 2, TAU = Math.PI * 2;
+const N = 12, SA = TAU / N;                  // 12 segmen per lantai
+const PR = 120, R = 330;                     // radius tiang & lantai
+const TILT = 0.28, TH = 34;                  // kemiringan kamera & tebal lantai
+const GAP_Y = 175, BR = 48;                  // jarak antar lantai & radius bola
+const BALL_D = (PR + R) / 2;                 // jarak bola dari pusat tiang
+const GRAV = 2900, BOUNCE = 800, VMAX = 2000, SMASH_COMBO = 3;
+
+const THEMES = [
+  { acc:'#5ef2d0', bg:['#06122c','#0c2146','#040a18'], pil:['#10192e','#5d86c9','#2c4474','#0d1426'], safe:[150,232,205], danger:[210,45,125], fin:[255,208,70],  ball:['#fff6b0','#ffc72c','#b36b00'], star:'190,220,255' },
+  { acc:'#ffb36b', bg:['#2a0a40','#5b1b5e','#12051c'], pil:['#241035','#a05cc0','#5e2d80','#1a0b2a'], safe:[255,214,140], danger:[70,34,130],  fin:[120,240,190], ball:['#e8fbff','#6fd0ff','#1c6fb0'], star:'255,200,230' },
+  { acc:'#c6f26b', bg:['#03241b','#0a4a37','#02110c'], pil:['#0b2a20','#4fa886','#26705a','#082017'], safe:[196,238,126], danger:[236,100,44], fin:[255,225,90],  ball:['#ffe3f1','#ff7eb6','#b01e6a'], star:'200,255,220' },
+  { acc:'#8fe3ff', bg:['#082838','#14566c','#03151d'], pil:['#0e2f40','#7ec6dd','#3f87a3','#0a2330'], safe:[206,242,255], danger:[76,52,160],  fin:[255,160,70],  ball:['#fff0d6','#ff9b3d','#b04a00'], star:'220,245,255' },
+  { acc:'#ff8ad0', bg:['#3a0a30','#6e1850','#17061a'], pil:['#2a0f2e','#d27cc0','#8a4284','#1d0a22'], safe:[255,176,214], danger:[56,30,110],  fin:[130,255,200], ball:['#e4fffb','#46e3d0','#08827a'], star:'255,210,240' }
+];
+let theme = THEMES[0], PAL = {};
+function applyTheme() {
+  theme = THEMES[(level - 1) % THEMES.length];
+  const dk = (c, f) => c.map(v => v * f | 0);
+  PAL = {
+    0: { top: theme.safe,   wall: dk(theme.safe, .78),   end: dk(theme.safe, .62) },
+    1: { top: theme.danger, wall: dk(theme.danger, .62), end: dk(theme.danger, .48) },
+    3: { top: theme.fin,    wall: dk(theme.fin, .78),    end: dk(theme.fin, .62) }
+  };
+  wrap.style.setProperty('--acc', theme.acc);
+}
+const rgb = (c, f = 1, a = 1) => `rgba(${c[0]*f|0},${c[1]*f|0},${c[2]*f|0},${a})`;
+const mod = (a, n) => ((a % n) + n) % n;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+/* ============ Penyimpanan ============ */
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : +v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+
+/* ============ Audio prosedural (WebAudio) ============ */
+let AC = null, muted = false;
+function ac() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(f1, f2, dur, type = 'sine', vol = .15) {
+  if (muted) return; const a = ac(); if (!a) return;
+  const t = a.currentTime, o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.setValueAtTime(f1, t);
+  o.frequency.exponentialRampToValueAtTime(Math.max(30, f2), t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(.001, t + dur);
+  o.connect(g); g.connect(a.destination); o.start(t); o.stop(t + dur);
+}
+function noise(dur, vol = .2) {
+  if (muted) return; const a = ac(); if (!a) return;
+  const len = Math.floor(a.sampleRate * dur), buf = a.createBuffer(1, len, a.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const s = a.createBufferSource(), g = a.createGain(); s.buffer = buf; g.gain.value = vol;
+  s.connect(g); g.connect(a.destination); s.start();
+}
+const sfx = {
+  bounce() { tone(300, 140, .12, 'sine', .2); },
+  pass()   { tone(520, 820, .09, 'triangle', .08); },
+  smash()  { noise(.28, .25); tone(200, 60, .25, 'sawtooth', .12); },
+  die()    { noise(.4, .25); tone(320, 45, .55, 'sawtooth', .16); },
+  win()    { [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => tone(f, f * 1.01, .22, 'triangle', .14), i * 110)); }
+};
+
+/* ============ Status game ============ */
+let level = Math.max(1, store.get('hd_level', 1));
+let best = store.get('hd_best', 0);
+let score = 0, levelScore = 0;
+let state = 'ready', stateT = 0;             // ready | playing | dead | win
+let rings = [], particles = [];
+let rot = 0, rotVel = 0, rotAccum = 0;
+let ballY = 60, ballVy = 0, camY = 140, combo = 0;
+let squash = 0, shake = 0, time = 0, startBottom = 0;
+let u = 1, VH = 1600;                        // skala & tinggi virtual
+
+/* ============ Level ============ */
+function buildLevel() {
+  const count = 12 + Math.min(level * 2, 24);
+  rings = [];
+  for (let i = 0; i < count; i++) {
+    const segs = new Array(N).fill(0);
+    const gap = i === 0 ? 3 : Math.max(2, 4 - Math.floor(level / 5)) + (Math.random() < .25 ? 1 : 0);
+    const gs = Math.floor(Math.random() * N);
+    for (let k = 0; k < gap; k++) segs[(gs + k) % N] = 2;
+    if (i > 1) {
+      let dn = Math.min(Math.floor(level / 2) + (Math.random() * 2 | 0), 6), tries = 0;
+      while (dn > 0 && tries++ < 50) {
+        const p = Math.floor(Math.random() * N);
+        if (segs[p] === 0) {
+          segs[p] = 1; dn--;
+          const q = (p + 1) % N;
+          if (dn > 0 && segs[q] === 0 && Math.random() < .5) { segs[q] = 1; dn--; }
+        }
+      }
+    }
+    rings.push({ y: -(i + 1) * GAP_Y, segs, gone: false, passed: false, hide: false });
+  }
+  rings.push({ y: -(count + 1) * GAP_Y, segs: new Array(N).fill(3), finish: true, gone: false, passed: false, hide: false });
+}
+
+function resetLevel(autoStart) {
+  applyTheme();
+  buildLevel();
+  ballY = 60; ballVy = 0; camY = ballY + 80; combo = 0; squash = 0; shake = 0;
+  particles.length = 0; rot = Math.random() * TAU;
+  score = levelScore;
+  startBottom = ballY - BR;
+  wrap.classList.remove('dead');
+  updateHud(true);
+  if (autoStart) { state = 'playing'; hideOverlay(); }
+  else { state = 'ready'; showOverlay('ORBIT DROP',
+    'Geser jari / mouse untuk memutar menara.<br>Jatuhkan bola lewat celah dan hindari lantai <b>bergaris-garis</b>.<br>Lolos 3 lantai beruntun = bola api menghancurkan lantai!',
+    'KETUK UNTUK MULAI'); }
+}
+
+/* ============ HUD ============ */
+let lastProg = -1, lastScoreShown = -1;
+function updateHud(force) {
+  lvA.textContent = level;
+  if (score !== lastScoreShown || force) {
+    scoreEl.textContent = score;
+    if (!force) { scoreEl.classList.remove('bump'); void scoreEl.offsetWidth; scoreEl.classList.add('bump'); }
+    lastScoreShown = score;
+  }
+  const fin = rings[rings.length - 1];
+  const prog = clamp((startBottom - (ballY - BR)) / (startBottom - fin.y), 0, 1);
+  const pct = Math.round(prog * 1000) / 10;
+  if (pct !== lastProg || force) { barFill.style.width = pct + '%'; lastProg = pct; }
+  comboEl.classList.toggle('on', combo >= SMASH_COMBO && state === 'playing');
+}
+function showOverlay(t, p, b) { ovTitle.textContent = t; ovText.innerHTML = p; ovBtn.textContent = b; overlay.classList.remove('hide'); }
+function hideOverlay() { overlay.classList.add('hide'); }
+
+/* ============ Input ============ */
+let dragging = false, lastX = 0;
+const keys = { l: false, r: false };
+
+function tap() {
+  const now = performance.now();
+  if (state === 'ready') { state = 'playing'; hideOverlay(); }
+  else if (state === 'dead' && now - stateT > 450) { resetLevel(true); }
+  else if (state === 'win' && now - stateT > 600) { level++; store.set('hd_level', level); levelScore = score; resetLevel(true); }
+}
+wrap.addEventListener('pointerdown', e => {
+  if (e.target === muteBtn) return;
+  ac(); dragging = true; lastX = e.clientX;
+  try { wrap.setPointerCapture(e.pointerId); } catch (_) {}
+  tap();
+});
+wrap.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX; lastX = e.clientX;
+  const d = dx / canvas.getBoundingClientRect().width * 5.2;
+  rot -= d; rotAccum -= d;
+});
+['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => wrap.addEventListener(ev, () => { dragging = false; }));
+wrap.addEventListener('contextmenu', e => e.preventDefault());
+muteBtn.addEventListener('pointerdown', e => e.stopPropagation());
+muteBtn.addEventListener('click', () => { muted = !muted; muteBtn.textContent = muted ? '🔇' : '🔊'; if (!muted) ac(); });
+addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.l = true;
+  else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.r = true;
+  else if (e.key === ' ' || e.key === 'Enter') { ac(); tap(); e.preventDefault(); }
+});
+addEventListener('keyup', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.l = false;
+  else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.r = false;
+});
+
+/* ============ Partikel ============ */
+function addP(p) { particles.push(p); }
+function splash(y, col) {
+  for (let i = 0; i < 9; i++) {
+    const a = rnd(0, TAU), s = rnd(60, 220);
+    addP({ x: Math.cos(a) * 20, y, z: BALL_D + Math.sin(a) * 20, vx: Math.cos(a) * s, vy: rnd(150, 380), vz: Math.sin(a) * s * .6,
+      life: .45, max: .45, size: rnd(4, 8), col, shape: 'c' });
+  }
+}
+function debris(ring) {
+  for (let i = 0; i < N; i++) {
+    const t = ring.segs[i]; if (t === 2) continue;
+    for (let k = 0; k < 2; k++) {
+      const a = rot + (i + Math.random()) * SA, r = rnd(PR + 20, R - 10), ca = Math.cos(a), sa = Math.sin(a);
+      addP({ x: r * ca, y: ring.y, z: r * sa, vx: ca * rnd(120, 360), vy: rnd(250, 650), vz: sa * rnd(120, 360),
+        life: rnd(.7, 1.1), max: 1.1, size: rnd(14, 26), col: Math.random() < .5 ? PAL[t].top : PAL[t].wall,
+        shape: 'd', rot: rnd(0, TAU), vr: rnd(-8, 8) });
+    }
+  }
+}
+function burst(col, n, speed) {
+  for (let i = 0; i < n; i++) {
+    const a = rnd(0, TAU), el = rnd(-.2, 1), s = rnd(speed * .4, speed);
+    addP({ x: Math.cos(a) * 10, y: ballY, z: BALL_D + Math.sin(a) * 10, vx: Math.cos(a) * s, vy: el * s + 200, vz: Math.sin(a) * s * .7,
+      life: rnd(.6, 1.1), max: 1.1, size: rnd(5, 11), col: Array.isArray(col[0]) ? col[i % col.length] : col, shape: 'c' });
+  }
+}
+
+/* ============ Update ============ */
+function localIndex() { return Math.floor(mod(Math.PI / 2 - rot, TAU) / SA) % N; }
+
+function die() {
+  state = 'dead'; stateT = performance.now(); shake = 1; combo = 0;
+  burst([[255, 70, 80], [255, 140, 90], [200, 20, 40]], 40, 600);
+  sfx.die(); wrap.classList.add('dead');
+  best = Math.max(best, score); store.set('hd_best', best);
+  showOverlay('GAME OVER', `Skor <b>${score}</b> &nbsp;•&nbsp; Terbaik <b>${best}</b>`, 'KETUK UNTUK ULANG');
+}
+function win(ring) {
+  state = 'win'; stateT = performance.now(); ballY = ring.y + BR; ballVy = 0; combo = 0;
+  burst([[255, 220, 60], [90, 240, 120], [255, 110, 190], [110, 190, 255]], 70, 700);
+  sfx.win();
+  best = Math.max(best, score); store.set('hd_best', best); store.set('hd_level', level + 1);
+  showOverlay(`LEVEL ${level} SELESAI!`, `Skor <b>${score}</b> &nbsp;•&nbsp; Terbaik <b>${best}</b>`, 'KETUK UNTUK LANJUT');
+}
+
+function update(dt) {
+  time += dt;
+  const kx = (keys.l ? 1 : 0) - (keys.r ? 1 : 0);
+  if (kx) { const d = kx * 3.4 * dt; rot += d; rotAccum += d; }
+  rotVel += (rotAccum / Math.max(dt, .001) - rotVel) * Math.min(1, dt * 10); rotAccum = 0;
+  squash = Math.max(0, squash - dt * 5);
+  shake = Math.max(0, shake - dt * 3);
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i]; p.life -= dt;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    p.vy -= GRAV * .5 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+    if (p.shape === 'd') p.rot += p.vr * dt;
+  }
+
+  if (state === 'ready') { ballY = 60 + Math.sin(time * 4) * 8; }
+  else if (state === 'playing') {
+    const prevBottom = ballY - BR;
+    ballVy = Math.max(-VMAX, ballVy - GRAV * dt);
+    ballY += ballVy * dt;
+    const bottom = ballY - BR;
+
+    if (ballVy < 0) {
+      for (const ring of rings) {
+        if (ring.gone) continue;
+        if (prevBottom >= ring.y && bottom < ring.y) {
+          const type = ring.segs[localIndex()];
+          if (type === 2) {                                   // celah: lolos
+            if (!ring.passed) { ring.passed = true; score++; combo++; sfx.pass(); }
+          } else if (type === 3) { win(ring); return; }       // garis finis
+          else if (combo >= SMASH_COMBO) {                    // bola api: hancurkan
+            ring.gone = true; ring.passed = true; score += 2; combo = 0; shake = .7;
+            debris(ring); sfx.smash();
+          } else if (type === 1) { die(); return; }           // kena merah
+          else {                                              // pantul
+            ballY = ring.y + BR; ballVy = BOUNCE; combo = 0; squash = 1;
+            splash(ring.y, PAL[0].wall); sfx.bounce(); break;
+          }
+        }
+      }
+    }
+    for (const r of rings) if (r.passed && !r.hide && (ballY - BR) < r.y - TH - 12) r.hide = true;
+    const target = ballY + 80;
+    if (target < camY) camY += (target - camY) * Math.min(1, dt * 12);
+  }
+  updateHud();
+}
+
+/* ============ Render ============ */
+const proj = (y, z) => VH * 0.2 + (camY - y) + z * TILT;
+
+function sprite(col) {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, `rgba(${col},1)`); gr.addColorStop(.55, `rgba(${col},.55)`); gr.addColorStop(1, `rgba(${col},0)`);
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64); return c;
+}
+const SPR = [sprite('255,255,255'), sprite('255,170,190'), sprite('255,190,120'), sprite('200,200,210')];
+const bokeh = Array.from({ length: 30 }, () => ({ x: rnd(0, VW), y: rnd(0, 2000), r: rnd(6, 34), a: rnd(.15, .6), s: Math.floor(rnd(0, 4)), v: rnd(2, 14) }));
+
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, 0, VH);
+  g.addColorStop(0, theme.bg[0]); g.addColorStop(.55, theme.bg[1]); g.addColorStop(1, theme.bg[2]);
+  ctx.fillStyle = g; ctx.fillRect(-30, -30, VW + 60, VH + 60);
+  const rg = ctx.createRadialGradient(CX, VH * .45, 20, CX, VH * .45, 520);
+  rg.addColorStop(0, `rgba(${theme.star},.10)`); rg.addColorStop(1, `rgba(${theme.star},0)`);
+  ctx.fillStyle = rg; ctx.fillRect(-30, -30, VW + 60, VH + 60);
+  ctx.fillStyle = `rgb(${theme.star})`;
+  for (const b of bokeh) {
+    const sy = mod(b.y + camY * (.1 + b.r / 90) + time * b.v * .3, VH + 120) - 60;
+    ctx.globalAlpha = b.a * (.35 + .65 * (.5 + .5 * Math.sin(time * 2 + b.x)));
+    ctx.beginPath(); ctx.arc(b.x, sy, 1 + b.r * .08, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawPillar() {
+  const fin = rings[rings.length - 1];
+  const bottom = Math.min(VH + 10, proj(fin.y, 0) + PR * TILT + 1);
+  const g = ctx.createLinearGradient(CX - PR, 0, CX + PR, 0);
+  g.addColorStop(0, theme.pil[0]); g.addColorStop(.3, theme.pil[1]); g.addColorStop(.62, theme.pil[2]); g.addColorStop(1, theme.pil[3]);
+  ctx.fillStyle = g; ctx.fillRect(CX - PR, -10, PR * 2, bottom + 10);
+  ctx.globalAlpha = .55; ctx.fillStyle = theme.acc;                    // garis neon di tiang
+  ctx.fillRect(CX - 40, -10, 4, bottom + 10); ctx.fillRect(CX + 36, -10, 4, bottom + 10);
+  ctx.globalAlpha = 1;
+}
+
+function endFace(a, cy, col) {
+  const ca = Math.cos(a), sa = Math.sin(a);
+  const x1 = CX + PR * ca, y1 = cy + PR * sa * TILT, x2 = CX + R * ca, y2 = cy + R * sa * TILT;
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x2, y2 + TH); ctx.lineTo(x1, y1 + TH); ctx.closePath();
+  ctx.fillStyle = rgb(col); ctx.fill();
+}
+
+function drawRing(ring, front) {
+  const cy = proj(ring.y, 0), list = [];
+  for (let i = 0; i < N; i++) {
+    if (ring.segs[i] === 2) continue;
+    const a0 = rot + i * SA, a1 = a0 + SA, c = a0 + SA / 2, d = Math.sin(c);
+    if ((d >= 0) !== front) continue;
+    list.push([i, a0, a1, d]);
+  }
+  list.sort((p, q) => p[3] - q[3]);
+  ctx.lineJoin = 'round'; ctx.lineWidth = 2;
+  for (const [i, a0, a1, d] of list) {
+    const pal = PAL[ring.segs[i]];
+    if (ring.segs[(i + N - 1) % N] === 2 && -Math.cos(a0) > 0) endFace(a0, cy, pal.end);
+    if (ring.segs[(i + 1) % N] === 2 && Math.cos(a1) > 0) endFace(a1, cy, pal.end);
+    if (d > -.5) {                                            // dinding luar
+      ctx.beginPath();
+      ctx.ellipse(CX, cy, R, R * TILT, 0, a0, a1);
+      ctx.ellipse(CX, cy + TH, R, R * TILT, 0, a1, a0, true);
+      ctx.closePath(); ctx.fillStyle = rgb(pal.wall, .8 + .2 * Math.max(0, d)); ctx.fill();
+    }
+    ctx.beginPath();                                          // permukaan atas
+    ctx.ellipse(CX, cy, R, R * TILT, 0, a0, a1);
+    ctx.ellipse(CX, cy, PR, PR * TILT, 0, a1, a0, true);
+    ctx.closePath(); ctx.fillStyle = rgb(pal.top); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,30,.3)'; ctx.stroke();
+    if (ring.segs[i] === 1) {                                 // garis peringatan
+      const c = a0 + SA / 2, mx = CX + BALL_D * Math.cos(c), my = cy + BALL_D * Math.sin(c) * TILT;
+      ctx.save(); ctx.clip(); ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 7;
+      for (let k = -4; k <= 4; k++) { ctx.beginPath(); ctx.moveTo(mx + k * 18 - 40, my + 40); ctx.lineTo(mx + k * 18 + 40, my - 40); ctx.stroke(); }
+      ctx.restore(); ctx.lineWidth = 2;
+    }
+    ctx.beginPath(); ctx.ellipse(CX, cy, R, R * TILT, 0, a0, a1);   // kilap tepi luar
+    ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 3; ctx.stroke(); ctx.lineWidth = 2;
+  }
+}
+
+function drawShadow(ring) {
+  if (ring.segs[localIndex()] === 2) return;
+  const k = clamp(1 - (ballY - BR - ring.y) / 520, .3, 1);
+  ctx.fillStyle = 'rgba(0,0,20,.4)';
+  ctx.beginPath(); ctx.ellipse(CX, proj(ring.y, BALL_D), BR * .95 * k, BR * .95 * k * TILT * 1.4, 0, 0, TAU); ctx.fill();
+}
+
+function drawBall() {
+  if (state === 'dead') return;
+  const r = BR, sy = proj(ballY, BALL_D);
+  const stretch = Math.min(.22, Math.max(0, -ballVy) / 9000);
+  const sx = 1 + .28 * squash - stretch * .5, sv = 1 - .28 * squash + stretch;
+  ctx.save();
+  ctx.translate(CX, sy + r); ctx.scale(sx, sv); ctx.translate(0, -r);
+  if (combo >= SMASH_COMBO && state === 'playing') {          // aura api
+    const fg = ctx.createRadialGradient(0, 0, r * .6, 0, 0, r * 2.2);
+    fg.addColorStop(0, 'rgba(255,200,60,.85)'); fg.addColorStop(.5, 'rgba(255,90,0,.45)'); fg.addColorStop(1, 'rgba(255,60,0,0)');
+    ctx.fillStyle = fg; ctx.beginPath(); ctx.arc(0, 0, r * 2.2, 0, TAU); ctx.fill();
+  }
+  const bg = ctx.createRadialGradient(-r * .35, -r * .4, r * .1, 0, 0, r * 1.15);
+  bg.addColorStop(0, theme.ball[0]); bg.addColorStop(.55, theme.ball[1]); bg.addColorStop(1, theme.ball[2]);
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.fillStyle = bg; ctx.fill();
+  ctx.save(); ctx.clip(); ctx.rotate(ballY * .012 - .5);      // pita berputar
+  ctx.fillStyle = 'rgba(255,255,255,.3)'; ctx.fillRect(-r, -r * .18, r * 2, r * .36);
+  ctx.fillStyle = 'rgba(0,0,0,.14)'; ctx.fillRect(-r, r * .36, r * 2, r * .14);
+  ctx.restore();
+  ctx.fillStyle = 'rgba(255,255,255,.6)'; ctx.beginPath(); ctx.ellipse(-r * .38, -r * .45, r * .22, r * .12, -.7, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const a = clamp(p.life / p.max, 0, 1), x = CX + p.x, y = proj(p.y, p.z);
+    ctx.fillStyle = rgb(p.col, 1, a);
+    if (p.shape === 'd') {
+      ctx.save(); ctx.translate(x, y); ctx.rotate(p.rot);
+      ctx.fillRect(-p.size / 2, -p.size / 3, p.size, p.size * .66); ctx.restore();
+    } else { ctx.beginPath(); ctx.arc(x, y, p.size * (.4 + .6 * a), 0, TAU); ctx.fill(); }
+  }
+}
+
+function render() {
+  ctx.setTransform(u, 0, 0, u, 0, 0);
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - .5) * shake * 14, (Math.random() - .5) * shake * 14);
+  drawBackground();
+
+  const vis = [];                                             // dari lantai terbawah ke teratas
+  for (let k = rings.length - 1; k >= 0; k--) {
+    const r = rings[k]; if (r.gone || r.hide) continue;
+    const sy = proj(r.y, 0); if (sy < -200 || sy > VH + 260) continue;
+    vis.push(r);
+  }
+  for (const r of vis) drawRing(r, false);                    // bagian belakang
+  drawPillar();
+
+  let shadowRing = null;
+  for (const r of vis) if (r.y < ballY - BR + 8) shadowRing = r;
+  let ballDrawn = false;
+  for (const r of vis) {
+    if (!ballDrawn && r.y > ballY) { drawBall(); ballDrawn = true; }
+    drawRing(r, true);                                        // bagian depan
+    if (r === shadowRing) drawShadow(r);
+  }
+  if (!ballDrawn) drawBall();
+  drawParticles();
+  ctx.restore();
+}
+
+/* ============ Ukuran & loop ============ */
+function resize() {
+  const rect = canvas.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.max(2, Math.round(rect.width * dpr));
+  canvas.height = Math.max(2, Math.round(rect.height * dpr));
+  u = canvas.width / VW; VH = canvas.height / u;
+}
+addEventListener('resize', resize);
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(.033, (now - last) / 1000); last = now;
+  update(dt); render();
+  requestAnimationFrame(frame);
+}
+
+resize();
+resetLevel(false);
+requestAnimationFrame(frame);
+
+// hook kecil untuk pengujian otomatis
+window.__hd = { get state() { return state; }, get score() { return score; }, get level() { return level; } };
+})();
+</script>
+</body>
+</html>
